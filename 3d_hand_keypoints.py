@@ -9,6 +9,7 @@ import pickle
 import plotly.graph_objects as go
 import shutil
 import xml.etree.cElementTree as ET
+import glob
 
 mp_hands = mp.solutions.hands
 
@@ -71,15 +72,16 @@ with open(os.path.join(args[0].root, "cam_data.pkl"), "rb") as f:
 with mp_hands.Hands(
     static_image_mode=True, max_num_hands=2, min_detection_confidence=0.5
 ) as hands:
-    for idx, file in enumerate(image_files):
-        file_path = os.path.join(args[0].root, "render", file, f"{file}_5.png")
+    base_path = os.path.join(args[0].root, "render")
+    for file in glob.glob("**/*.png", root_dir=base_path):
+        file_path = os.path.join(base_path, file)
         bbox = []
         image = cv2.flip(cv2.imread(file_path), 1)
         # Convert the BGR image to RGB before processing.
         results = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
         if not results.multi_handedness:
-            print("Skipping:", file)
+            print("-- WARNING: Skipping:", file)
             continue
 
         handedness = results.multi_handedness[0].classification[0].label
@@ -121,7 +123,6 @@ with mp_hands.Hands(
         image = cv2.flip(image, 1)
 
         bboxes.append([*bbox_min, *bbox_size])
-        cv2.rectangle(image, bbox_min.astype(int), bbox_max.astype(int), (255, 0, 0), 2)
 
         handRectangles += [
             op.Rectangle(0, 0, 0, 0),
@@ -135,51 +136,49 @@ shutil.rmtree(params["camera_parameter_path"])
 os.makedirs(params["camera_parameter_path"])
 
 i = 1
-for dir in valid_files:
-    for idx in range(5, 6):
-        cam = cam_data[f"{dir}_{idx}"]
+print(f"-- INFO: Found bounding boxes for {len(valid_files)} images")
+for file in valid_files:
+    cam = cam_data[os.path.basename(file).split(".")[0]]
 
-        image_path = os.path.join(args[0].root, "render", dir, f"{dir}_{idx}.png")
-        shutil.copyfile(image_path, os.path.join(params["image_dir"], f"{i}.png"))
+    image_path = os.path.join(args[0].root, "render", file)
+    shutil.copyfile(image_path, os.path.join(params["image_dir"], f"{i}.png"))
 
-        # Write camera parameter XML
-        root = ET.Element("opencv_storage")
-        ext_matrix = ET.SubElement(root, "CameraMatrix", type_id="opencv-matrix")
-        ET.SubElement(ext_matrix, "rows").text = str(3)
-        ET.SubElement(ext_matrix, "cols").text = str(4)
-        ET.SubElement(ext_matrix, "dt").text = "d"
-        ET.SubElement(ext_matrix, "data").text = " ".join(
-            map(str, cam["extrinsics_opencv"].flatten().tolist())
-        )
+    # Write camera parameter XML
+    root = ET.Element("opencv_storage")
+    ext_matrix = ET.SubElement(root, "CameraMatrix", type_id="opencv-matrix")
+    ET.SubElement(ext_matrix, "rows").text = str(3)
+    ET.SubElement(ext_matrix, "cols").text = str(4)
+    ET.SubElement(ext_matrix, "dt").text = "d"
+    ET.SubElement(ext_matrix, "data").text = " ".join(
+        map(str, cam["extrinsics_opencv"].flatten().tolist())
+    )
 
-        int_matrix = ET.SubElement(root, "Intrinsics", type_id="opencv-matrix")
-        k = np.eye(3)
-        k[0, 0] = cam["K"][0]
-        k[1, 1] = cam["K"][1]
-        k[0, 2] = cam["K"][2]
-        k[1, 2] = cam["K"][3]
-        ET.SubElement(int_matrix, "rows").text = str(3)
-        ET.SubElement(int_matrix, "cols").text = str(3)
-        ET.SubElement(int_matrix, "dt").text = "d"
-        ET.SubElement(int_matrix, "data").text = " ".join(
-            map(str, k.flatten().tolist())
-        )
+    int_matrix = ET.SubElement(root, "Intrinsics", type_id="opencv-matrix")
+    k = np.eye(3)
+    k[0, 0] = cam["K"][0]
+    k[1, 1] = cam["K"][1]
+    k[0, 2] = cam["K"][2]
+    k[1, 2] = cam["K"][3]
+    ET.SubElement(int_matrix, "rows").text = str(3)
+    ET.SubElement(int_matrix, "cols").text = str(3)
+    ET.SubElement(int_matrix, "dt").text = "d"
+    ET.SubElement(int_matrix, "data").text = " ".join(map(str, k.flatten().tolist()))
 
-        dist_matrix = ET.SubElement(root, "Distortion", type_id="opencv-matrix")
-        ET.SubElement(dist_matrix, "rows").text = str(8)
-        ET.SubElement(dist_matrix, "cols").text = str(1)
-        ET.SubElement(dist_matrix, "dt").text = "d"
-        ET.SubElement(dist_matrix, "data").text = " ".join(
-            map(str, np.zeros(8).flatten().tolist())
-        )
+    dist_matrix = ET.SubElement(root, "Distortion", type_id="opencv-matrix")
+    ET.SubElement(dist_matrix, "rows").text = str(8)
+    ET.SubElement(dist_matrix, "cols").text = str(1)
+    ET.SubElement(dist_matrix, "dt").text = "d"
+    ET.SubElement(dist_matrix, "data").text = " ".join(
+        map(str, np.zeros(8).flatten().tolist())
+    )
 
-        tree = ET.ElementTree(root)
-        text = ET.tostring(root, xml_declaration=True).decode("utf-8")
-        text = str.replace(text, "'", '"')
-        with open(os.path.join(params["camera_parameter_path"], f"{i}.xml"), "w") as f:
-            f.write(text)
+    tree = ET.ElementTree(root)
+    text = ET.tostring(root, xml_declaration=True).decode("utf-8")
+    text = str.replace(text, "'", '"')
+    with open(os.path.join(params["camera_parameter_path"], f"{i}.xml"), "w") as f:
+        f.write(text)
 
-        i += 1
+    i += 1
 
 # Run openpose 3D hand detection module
 datums = op.VectorDatum()
@@ -187,7 +186,7 @@ result = opWrapper.detectHandKeypoints3D(datums, handRectangles)
 if result:
     coords = datums[0].handKeypoints3D[1][0]
 else:
-    print("Pose estimation failed")
+    print("-- ERROR: Pose estimation failed")
     exit(1)
 
 fig = go.Figure(
@@ -196,7 +195,10 @@ fig = go.Figure(
         y=coords[:, 1],
         z=coords[:, 2],
         mode="markers"
+        # mode='lines',
+        # line_width=2,
+        # line_color='blue'
     )
 )
 fig.write_html("keypoints.html", auto_open=True)
-print("Saved 3D visualization in 'keypoints.html'")
+print("-- INFO: Saved 3D visualization in 'keypoints.html'")
